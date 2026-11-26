@@ -125,7 +125,8 @@ jobs:
             -i ~/.ssh/deploy_key \
             -o StrictHostKeyChecking=yes \
             -o BatchMode=yes \
-            -o ConnectTimeout=15 \
+            -o ConnectTimeout=30 \
+            -o ConnectionAttempts=3 \
             "$SSH_USER@$SSH_HOST" \
             "bash ~/secure-memo/deploy.sh '$IMAGE'"
 
