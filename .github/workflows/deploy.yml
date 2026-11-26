@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-
   workflow_dispatch:
 
 permissions:
@@ -12,134 +11,151 @@ permissions:
 
 concurrency:
   group: production-deployment
-
   cancel-in-progress: false
 
+env:
+  IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/secure-memo:${{ github.sha }}
+
 jobs:
-  build-and-deploy:
+  # ==========================================
+  # CI: GitHub Hosted Runner
+  # ==========================================
+
+  build:
     runs-on: ubuntu-latest
 
     timeout-minutes: 20
 
-    env:
-      IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/secure-memo:${{ github.sha }}
-
     steps:
-      # ====================================
-      # 1. Checkout
-      # ====================================
-
       - name: Checkout source code
-
         uses: actions/checkout@v4
-
-      # ====================================
-      # 2. Docker Hub Login
-      # ====================================
 
       - name: Login to Docker Hub
 
         env:
           DOCKER_USER: ${{ secrets.DOCKERHUB_USERNAME }}
-
           DOCKER_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
         run: |
-
           echo "$DOCKER_TOKEN" | docker login \
             -u "$DOCKER_USER" \
             --password-stdin
 
-      # ====================================
-      # 3. Build Image
-      # ====================================
-
       - name: Build Docker image
 
         run: |
-
           docker build \
             --build-arg BUILD_VERSION="$GITHUB_SHA" \
             -t "$IMAGE" .
 
-      # ====================================
-      # 4. Image Validation
-      # ====================================
-
       - name: Validate Python syntax
 
         run: |
-
-          docker run --rm "$IMAGE" \
-            python -c \
+          docker run --rm "$IMAGE" python -c \
             "import ast,pathlib; ast.parse(pathlib.Path('/app/app.py').read_text())"
-
-      # ====================================
-      # 5. Push Image
-      # ====================================
 
       - name: Push image to Docker Hub
 
         run: |
-
           docker push "$IMAGE"
 
           LATEST="${IMAGE%:*}:latest"
 
           docker tag "$IMAGE" "$LATEST"
-
           docker push "$LATEST"
 
-      # ====================================
-      # 6. Deploy to Production
-      # ====================================
-
-      - name: Deploy via SSH
-
-        env:
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-
-          SSH_USER: ${{ secrets.SSH_USER }}
-
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-
-          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+      - name: Export Docker image
 
         run: |
+          docker save "$IMAGE" | gzip > image.tar.gz
 
-          mkdir -p ~/.ssh
+      - name: Upload deployment artifact
 
-          chmod 700 ~/.ssh
+        uses: actions/upload-artifact@v4
 
-          printf '%s\n' "$SSH_PRIVATE_KEY" \
-            > ~/.ssh/deploy_key
-
-          chmod 600 ~/.ssh/deploy_key
-
-          printf '%s\n' "$SSH_KNOWN_HOSTS" \
-            > ~/.ssh/known_hosts
-
-          chmod 600 ~/.ssh/known_hosts
-
-          ssh \
-            -i ~/.ssh/deploy_key \
-            -o StrictHostKeyChecking=yes \
-            -o BatchMode=yes \
-            -o ConnectTimeout=30 \
-            -o ConnectionAttempts=3 \
-            "$SSH_USER@$SSH_HOST" \
-            "bash ~/secure-memo/deploy.sh '$IMAGE'"
-
-      # ====================================
-      # 7. Cleanup
-      # ====================================
+        with:
+          name: deployment-image
+          path: image.tar.gz
+          retention-days: 1
 
       - name: Cleanup credentials
 
         if: always()
 
+        run: docker logout
+
+  # ==========================================
+  # CD: Mac Self-hosted Runner
+  # ==========================================
+
+  deploy:
+    needs: build
+
+    runs-on: [self-hosted, macOS, ARM64]
+
+    timeout-minutes: 15
+
+    steps:
+      - name: Download Docker image
+
+        uses: actions/download-artifact@v4
+
+        with:
+          name: deployment-image
+
+      - name: Deploy via SSH
+
+        shell: bash
+
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+
         run: |
 
-          docker logout || true
+          set -euo pipefail
 
-          rm -f ~/.ssh/deploy_key
+          SSH_DIR=$(mktemp -d)
+
+          trap 'rm -rf "$SSH_DIR"' EXIT
+
+          chmod 700 "$SSH_DIR"
+
+          printf '%s\n' "$SSH_PRIVATE_KEY" \
+            > "$SSH_DIR/deploy_key"
+
+          chmod 600 "$SSH_DIR/deploy_key"
+
+          printf '%s\n' "$SSH_KNOWN_HOSTS" \
+            > "$SSH_DIR/known_hosts"
+
+          SSH_OPTIONS=(
+            -i "$SSH_DIR/deploy_key"
+            -o StrictHostKeyChecking=yes
+            -o UserKnownHostsFile="$SSH_DIR/known_hosts"
+            -o BatchMode=yes
+            -o ConnectTimeout=15
+          )
+
+          echo "Transferring Docker image"
+
+          ssh "${SSH_OPTIONS[@]}" \
+            "$SSH_USER@$SSH_HOST" \
+            "bash -o pipefail -c 'gzip -dc | docker load'" \
+            < image.tar.gz
+
+          echo "Starting Blue-Green deployment"
+
+          ssh "${SSH_OPTIONS[@]}" \
+            "$SSH_USER@$SSH_HOST" \
+            "bash ~/secure-memo/deploy.sh '$IMAGE'"
+
+      - name: Cleanup deployment artifact
+
+        if: always()
+
+        shell: bash
+
+        run: rm -f image.tar.gz

@@ -55,7 +55,9 @@ export APP_IMAGE="$NEW_IMAGE"
 # 2. Pull new Docker image
 # ==========================================
 
-docker compose pull "$TARGET"
+if ! docker image inspect "$NEW_IMAGE" >/dev/null 2>&1; then
+    docker compose pull "$TARGET"
+fi
 
 
 # ==========================================
@@ -65,6 +67,7 @@ docker compose pull "$TARGET"
 docker compose up \
     -d \
     --no-deps \
+    --pull never \
     --wait \
     --wait-timeout 120 \
     "$TARGET"
