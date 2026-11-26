@@ -1,0 +1,147 @@
+name: secure-memo
+
+x-was: &was-common
+  image: ${APP_IMAGE:-secure-memo:local}
+
+  restart: unless-stopped
+
+  environment: &was-env
+    DB_HOST: db
+    DB_NAME: ${DB_NAME}
+    DB_USER: ${DB_USER}
+    DB_PASSWORD: ${DB_PASSWORD}
+
+    JWT_SECRET: ${JWT_SECRET}
+    CSRF_SECRET: ${CSRF_SECRET}
+
+    TEST_USERNAME: ${TEST_USERNAME}
+    TEST_PASSWORD: ${TEST_PASSWORD}
+
+    CANDIDATE_NAME: ${CANDIDATE_NAME}
+    CANDIDATE_GITHUB: ${CANDIDATE_GITHUB}
+
+    PUBLIC_ORIGIN: ${PUBLIC_ORIGIN}
+
+  networks:
+    - frontend_network
+    - backend_network
+
+  depends_on:
+    db:
+      condition: service_healthy
+
+  expose:
+    - "8000"
+
+  healthcheck:
+    test:
+      - CMD
+      - python
+      - -c
+      - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
+    interval: 5s
+    timeout: 5s
+    retries: 12
+    start_period: 15s
+
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  # ========================================
+  # WEB
+  # ========================================
+
+  web:
+    image: nginx:alpine
+
+    restart: unless-stopped
+
+    ports:
+      - "80:80"
+      - "443:443"
+
+    volumes:
+      - ./nginx:/etc/nginx/conf.d:ro
+      - ./runtime:/etc/nginx/runtime:ro
+      - ./certs:/etc/nginx/certs:ro
+
+    networks:
+      - frontend_network
+
+  # ========================================
+  # WAS BLUE
+  # ========================================
+
+  was-blue:
+    <<: *was-common
+
+    environment:
+      <<: *was-env
+      SLOT: blue
+
+  # ========================================
+  # WAS GREEN
+  # ========================================
+
+  was-green:
+    <<: *was-common
+
+    environment:
+      <<: *was-env
+      SLOT: green
+
+  # ========================================
+  # DATABASE
+  # ========================================
+
+  db:
+    image: mariadb:11.4
+
+    restart: unless-stopped
+
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+
+      MARIADB_DATABASE: ${DB_NAME}
+
+      MARIADB_USER: ${DB_USER}
+
+      MARIADB_PASSWORD: ${DB_PASSWORD}
+
+    volumes:
+      - db_data:/var/lib/mysql
+
+    networks:
+      - backend_network
+
+    healthcheck:
+      test:
+        - CMD
+        - healthcheck.sh
+        - --connect
+        - --innodb_initialized
+
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+# ==========================================
+# NETWORKS
+# ==========================================
+
+networks:
+  frontend_network:
+    driver: bridge
+
+  backend_network:
+    driver: bridge
+    internal: true
+
+# ==========================================
+# VOLUMES
+# ==========================================
+
+volumes:
+  db_data:
